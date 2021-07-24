@@ -1,0 +1,533 @@
+<html>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+  canvas {
+  border: 1px solid black;
+}
+.invisible {
+  display: none;
+}
+.text-center {
+  text-align: center;
+}
+.center-block {
+  display: block;
+  margin: auto;
+}
+.row {
+  margin: 10px;
+}
+tr td {
+  padding-right: 10px;
+  width: 25%;
+  vertical-align: top;
+  font: 14px 'Lucida Grande', sans-serif;
+}
+</style>
+<script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+<script src="https://threejs.org/examples/js/libs/stats.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.6.5/dat.gui.min.js"></script>
+
+<script async src="http://localhost:8000/opencv.js"></script>
+
+<body>
+<div id="container">
+  <table cellpadding="0" cellspacing="0" width="100%" border="0">
+    <tr>
+      <td></td>
+      <td>
+        <div class="text-center">
+          <span>Current Filter: </span><span id="filterName">Pass Through</span>
+        </div>
+      </td>
+      <td>
+        <div>Select Filter:</div>
+      </td>
+      <td></td>
+    </tr>
+    <tr>
+      <td></td>
+      <td>
+        <canvas class="center-block" id="canvasOutput" width=320 height=240></canvas>
+      </td>
+      <td>
+        <div id="guiContainer"></div>
+      </td>
+      <td></td>
+    </tr>
+  </table>
+  <div class="invisible">
+    <video id="video" class="hidden">Your browser does not support the video tag.</video>
+  </div>
+</div>
+</body>
+<script>
+
+  var Module = {
+  preRun: [function() {
+
+      console.log('in preRun');
+    }],
+  postRun: [] ,
+          onRuntimeInitialized: function() {
+              console.log("onRuntimeInitialized...");
+              opencvIsReady();
+          },
+  print: (function() {
+    console.log('print called');
+  })(),
+  printErr: function(text) {
+    console.log('printErr called');
+    console.log(text);
+  },
+  setStatus: function(text) {
+    console.log('setStatus called');
+    console.log(text);
+  }
+};
+
+var ENV = [];
+Module.setStatus('Downloading...');
+window.onerror = function(event) {
+  Module.setStatus('Exception thrown, see JavaScript console');
+  Module.setStatus = function(text) {
+    if (text) Module.printErr('[post-exception status] ' + text);
+  };
+};
+Module.preRun.push(function() { Module['arguments'].push('GLOG_logtostderr = 1');
+ Module['arguments'].push('GLOG_v=0');
+ Module['arguments'].push('GLOG_stderrthreshold=0');
+ ENV.push('GLOG_logtostderr = 1');
+  ENV.push('GLOG_v=0');
+  ENV.push('GLOG_stderrthreshold=0');
+ });
+
+  // In this case, We set width 320, and the height will be computed based on the input stream.
+let width = 320;
+let height = 0;
+
+// whether streaming video from the camera.
+let streaming = false;
+
+let video = document.getElementById("video");
+let stream = null;
+let vc = null;
+
+function startCamera() {
+  if (streaming) return;
+  navigator.mediaDevices.getUserMedia({video: true, audio: false})
+    .then(function(s) {
+    stream = s;
+    video.srcObject = s;
+    video.play();
+  })
+    .catch(function(err) {
+    console.log("An error occured! " + err);
+  });
+
+  video.addEventListener("canplay", function(ev){
+    if (!streaming) {
+      height = video.videoHeight / (video.videoWidth/width);
+      video.setAttribute("width", width);
+      video.setAttribute("height", height);
+      streaming = true;
+      vc = new cv.VideoCapture(video);
+    }
+    startVideoProcessing();
+  }, false);
+}
+
+let lastFilter = '';
+let src = null;
+let frameGray = null;
+let points1 =  null;
+let points2 = null;
+let previousFrameGray = null;
+let tracks = null;
+let status =  null;
+let error = null;
+var frameCnt = 0;
+
+
+// parameters for lucas kanade optical flow
+let winSize = null;
+let maxLevel = 2;
+let criteria = null;
+
+
+function startVideoProcessing() {
+  if (!streaming) { console.warn("Please startup your webcam"); return; }
+  stopVideoProcessing();
+  src = new cv.Mat(height, width, cv.CV_8UC4 );
+  frameGray = new cv.Mat(height, width, cv.CV_8UC4);
+  previousFrameGray = new cv.Mat(height, width, cv.CV_8UC4);
+  points2 = new cv.Mat(25,2, cv.CV_32FC2);
+  tracks = new  cv.MatVector();
+  status = new cv.Mat();
+  error = new cv.Mat();
+  winSize = new cv.Size(15, 15);
+  criteria = new cv.TermCriteria(cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 20, 0.03);
+
+  requestAnimationFrame(processVideo);
+}
+
+function passThrough(src) {
+
+  return src;
+}
+function createFeaturePoints(frameGray, points1, maxCorners){
+
+  maxCorners = Math.max(maxCorners, 1);
+  let qualityLevel = 0.01;
+  let minDistance = 25;
+  let blockSize = 3;
+  let k = 0.04;
+  let useHarrisDetector = false;
+  cv.goodFeaturesToTrack( frameGray,
+                        points1,
+                        maxCorners,
+                        qualityLevel,
+                        minDistance,
+                        new cv.Mat(),
+                        blockSize,
+                        useHarrisDetector,
+                        k );
+
+}
+
+function gray(src) {
+  dstC1 = new cv.Mat(height, width, cv.CV_32FC1);
+
+  cv.cvtColor(src, dstC1, cv.COLOR_RGBA2GRAY);
+
+sfmReconstruct();
+//   sfmEuclideanToHomogeneous();
+  return dstC1;
+}
+
+
+function processVideo() {
+  stats.begin();
+  vc.read(src);
+  let result;
+  switch (controls.filter) {
+    case 'passThrough': result = passThrough(src); break;
+    case 'startMotion': result = startMotion(src); break;
+    case 'endMotion' : result = endMotion(src); break;
+
+    default: result = passThrough(src);
+  }
+  cv.imshow("canvasOutput", result);
+  stats.end();
+  lastFilter = controls.filter;
+  requestAnimationFrame(processVideo);
+}
+
+function stopVideoProcessing() {
+  if (src != null && !src.isDeleted()) src.delete();
+  if (frameGray != null && !frameGray.isDeleted()) frameGray.delete();
+}
+
+function stopCamera() {
+  if (!streaming) return;
+  stopVideoProcessing();
+  document.getElementById("canvasOutput").getContext("2d").clearRect(0, 0, width, height);
+  video.pause();
+  video.srcObject=null;
+  stream.getVideoTracks()[0].stop();
+  streaming = false;
+}
+
+
+function startMotion(src){
+  frameCnt++;
+
+  cv.cvtColor(src, frameGray, cv.COLOR_RGBA2GRAY);
+
+  if(points1 === null || frameCnt % 10 === 0){
+    let maxCorners = 25;
+    points1 =  new cv.Mat(25,2, cv.CV_32FC2);
+
+    createFeaturePoints(frameGray, points1, maxCorners);
+    let cvPoints1 = getCvPointForMatPoints(points1);
+    circlePoints(src, cvPoints1);
+
+    let pointsInFrame = getPointsForTrack(cvPoints1);
+    tracks.push_back(pointsInFrame);
+
+  }else{
+    // calculate optical flow
+   cv.calcOpticalFlowPyrLK(previousFrameGray, frameGray, points1, points2, status, error, winSize, maxLevel, criteria);
+   let cvPoints2 = getCvPointForMatPoints(points2);
+   circlePoints(src, cvPoints2);
+
+   let pointsInFrame = getPointsForTrack(cvPoints2);
+   tracks.push_back(pointsInFrame);
+
+
+  // now update the previous frame and previous points
+   points1.delete();
+   points1 = null;
+   points1 = new cv.Mat(cvPoints2.length, 1, cv.CV_32FC2);
+   for (let i = 0; i < cvPoints2.length; i++) {
+            points1.data32F[i*2] = cvPoints2[i].x;
+            points1.data32F[i*2+1] = cvPoints2[i].y;
+    }
+  }
+
+  frameGray.copyTo(previousFrameGray);
+
+  //let points2 =  new cv.PointVector();
+  return src;
+}
+function endMotion(src){
+  for( i = 0 ; i< tracks.size(); i++){
+    let mat = tracks.get(i);
+    // console.log("printing track " + i);
+    // console.log(mat.data32F);
+
+  }
+  let rs = new cv.MatVector();
+  let ts = new cv.MatVector();
+  let K =   sfmIntrinsicParams();
+
+  let points3D = new cv.MatVector();
+  cv.reconstructForJs(tracks, rs,ts,K,points3D, true);
+    console.log("After sfm Call");
+    console.log("RS size" + rs.size());
+
+    console.log("Ts size" + ts.size());
+    console.log("points3D size" + points3D.size());
+    //for(var i = 0 ; i< rs.size())
+    deleteMatVector(tracks);
+    deleteMatVector(rs);
+    deleteMatVector(ts);
+    deleteMatVector(K);
+    deleteMatVector(points3D);
+  controls.setFilter("passThrough");
+  return src;
+}
+function getCvPointForMatPoints(matPoints){
+  let cvPoints = [];
+  let nColumns = matPoints.rows;
+  for(i=0;i<nColumns;i++){
+    cvPoints.push(new cv.Point(matPoints.data32F[i*2], matPoints.data32F[i*2+1]));
+  }
+  return cvPoints;
+
+}
+function getPointsForTrack(cvPoints){
+  let nColumns = cvPoints.length;
+
+  let pointsInFrame = new cv.Mat(2,nColumns,cv.CV_32FC1);
+ const nChannels = pointsInFrame.channels();
+ for (var i = 0; i < nColumns; i++) {
+     pointsInFrame.data32F[0 * nColumns * nChannels + i * nChannels] = cvPoints[i].x;
+     pointsInFrame.data32F[1 * nColumns * nChannels + i * nChannels] = cvPoints[i].y;
+  //   console.log( cvPoints[i].x, cvPoints[i].y);
+   }
+return pointsInFrame;
+}
+function circlePoints(src, points){
+  let color = [];
+  for (let i = 0; i < points.length; i++) {
+    let color = new cv.Scalar(parseInt(Math.random()*255), parseInt(Math.random()*255),
+                             parseInt(Math.random()*255), 255);
+    cv.circle(src, points[i], 5, color, -1);
+
+  }
+}
+function buildTracksForReconstruction(){
+   var tracks = new cv.MatVector();
+   var track1 = new cv.Mat(2, 9, cv.CV_32FC1);
+   const nChannels = track1.channels();
+   const nColumns = 9;
+   var data  = track1.data32F;
+   track1.data32F[0 * nColumns * nChannels + 0 * nChannels] = 100.1;
+   track1.data32F[0 * nColumns * nChannels + 1 * nChannels] = 100.2;
+   track1.data32F[0 * nColumns * nChannels + 2 * nChannels] = 100.3;
+   track1.data32F[0 * nColumns * nChannels + 3 * nChannels] = 100.4;
+   track1.data32F[0 * nColumns * nChannels + 4 * nChannels] = 100.5;
+   track1.data32F[0 * nColumns * nChannels + 5 * nChannels] = 100.6;
+   track1.data32F[0 * nColumns * nChannels + 6 * nChannels] = 100.7;
+   track1.data32F[0 * nColumns * nChannels + 7 * nChannels] = 100.8;
+   track1.data32F[0 * nColumns * nChannels + 8 * nChannels] = 100.9;
+
+   track1.data32F[1 * nColumns * nChannels + 0 * nChannels] = 444.2;
+   track1.data32F[1 * nColumns * nChannels + 1 * nChannels] = 444.25;
+   track1.data32F[1 * nColumns * nChannels + 2 * nChannels] = 444.3;
+   track1.data32F[1 * nColumns * nChannels + 3 * nChannels] = 444.4;
+   track1.data32F[1 * nColumns * nChannels + 4 * nChannels] = 444.5;
+   track1.data32F[1 * nColumns * nChannels + 5 * nChannels] = 444.6;
+   track1.data32F[1 * nColumns * nChannels + 6 * nChannels] = 444.7;
+   track1.data32F[1 * nColumns * nChannels + 7 * nChannels] = 444.8;
+   track1.data32F[1 * nColumns * nChannels + 8 * nChannels] = 444.9;
+
+
+   console.log(track1.floatAt(0,0));
+   console.log(track1.floatAt(0,1));
+   console.log(track1.floatAt(0,2));
+   console.log(track1.floatAt(0,3));
+   console.log(track1.floatAt(0,4));
+
+   tracks.push_back(track1);
+
+   var track2 = new cv.Mat(2, 9, cv.CV_32FC1);
+   track2.data32F[0 * nColumns * nChannels + 0 * nChannels] = 100.3;
+   track2.data32F[0 * nColumns * nChannels + 1 * nChannels] = 100.5;
+   track2.data32F[0 * nColumns * nChannels + 2 * nChannels] = 100.6;
+   track2.data32F[0 * nColumns * nChannels + 3 * nChannels] = 100.6;
+   track2.data32F[0 * nColumns * nChannels + 4 * nChannels] = 100.8;
+   track2.data32F[0 * nColumns * nChannels + 5 * nChannels] = 100.9;
+   track2.data32F[0 * nColumns * nChannels + 6 * nChannels] = 101.10;
+   track2.data32F[0 * nColumns * nChannels + 7 * nChannels] = 101.2;
+   track2.data32F[0 * nColumns * nChannels + 8 * nChannels] = 101.3;
+
+
+   track2.data32F[1 * nColumns * nChannels + 0 * nChannels] = 444.2;
+   track2.data32F[1 * nColumns * nChannels + 1 * nChannels] = 444.3;
+   track2.data32F[1 * nColumns * nChannels + 2 * nChannels] = 444.3;
+   track2.data32F[1 * nColumns * nChannels + 3 * nChannels] = 444.4;
+   track2.data32F[1 * nColumns * nChannels + 4 * nChannels] = 444.5;
+   track2.data32F[1 * nColumns * nChannels + 5 * nChannels] = 444.6;
+   track2.data32F[1 * nColumns * nChannels + 6 * nChannels] = 444.7;
+   track2.data32F[1 * nColumns * nChannels + 7 * nChannels] = 444.8;
+   track2.data32F[1 * nColumns * nChannels + 8 * nChannels] = 444.9;
+   tracks.push_back(track2);
+
+   var track3 = new cv.Mat(2, 9, cv.CV_32FC1);
+   track3.data32F[0 * nColumns * nChannels + 0 * nChannels] = 100.3;
+   track3.data32F[0 * nColumns * nChannels + 1 * nChannels] = 100.5;
+   track3.data32F[0 * nColumns * nChannels + 2 * nChannels] = 100.6;
+   track3.data32F[0 * nColumns * nChannels + 3 * nChannels] = 100.6;
+   track3.data32F[0 * nColumns * nChannels + 4 * nChannels] = 100.8;
+   track3.data32F[0 * nColumns * nChannels + 5 * nChannels] = 100.9;
+   track3.data32F[0 * nColumns * nChannels + 6 * nChannels] = 101.2;
+   track3.data32F[0 * nColumns * nChannels + 7 * nChannels] = 101.3;
+   track3.data32F[0 * nColumns * nChannels + 8 * nChannels] = 101.4;
+
+   track3.data32F[1 * nColumns * nChannels + 0 * nChannels] = 444.2;
+   track3.data32F[1 * nColumns * nChannels + 1 * nChannels] = 444.3;
+   track3.data32F[1 * nColumns * nChannels + 2 * nChannels] = 444.3;
+   track3.data32F[1 * nColumns * nChannels + 3 * nChannels] = 444.4;
+   track3.data32F[1 * nColumns * nChannels + 4 * nChannels] = 444.5;
+   track3.data32F[1 * nColumns * nChannels + 5 * nChannels] = 444.6;
+   track3.data32F[1 * nColumns * nChannels + 6 * nChannels] = 444.7;
+   track3.data32F[1 * nColumns * nChannels + 7 * nChannels] = 444.8;
+   track3.data32F[1 * nColumns * nChannels + 8 * nChannels] = 444.9;
+
+   tracks.push_back(track3);
+
+   return tracks;
+}
+
+function deleteMatVector(mc){
+  for(i=0; i<mc.size();i++){
+    var mat = mc.get(i);
+    mat.delete();
+  }
+}
+function sfmIntrinsicParams(){
+  var K = new cv.Mat(3, 3, cv.CV_64FC1);
+  console.log("number of channels for K =" + K.channels());
+  let  f = 933;
+  let cx = 540;
+  let cy = 360;
+   K.data64F[0] = f;
+   K.data64F[1] =0;
+   K.data64F[2] =cx;
+   K.data64F[3] =0;
+   K.data64F[4] =f;
+   K.data64F[5] =cy;
+   K.data64F[6] =0;
+   K.data64F[7] =0;
+   K.data64F[8] =1;
+
+
+   return K;
+}
+function sfmReconstruct(){
+  var tracks = buildTracksForReconstruction();
+  var rs = new cv.MatVector();
+  var ts = new cv.MatVector();
+  var K =   sfmIntrinsicParams();
+
+  var points3D = new cv.MatVector();
+
+  cv.reconstruct(tracks, rs,ts,K,points3D);
+  if(rs.size() > 0){
+    console.log("RS size" + rs.size());
+  }
+  if(ts.size() > 0){
+    console.log("Ts size" + ts.size());
+  }
+  if(points3D.size() > 0){
+    console.log("points3D size" + points3D.size());
+  }
+  this.setFilter("passThrough");
+  deleteMatVector(tracks);
+  deleteMatVector(rs);
+  deleteMatVector(ts);
+  deleteMatVector(K);
+  deleteMatVector(points3D);
+
+
+}
+
+var stats = null;
+
+var filters = {
+  'passThrough': 'Pass Through',
+  'startMotion': 'Start Motion',
+  'endMotion': 'End Motion'
+};
+
+var filterName = document.getElementById('filterName');
+
+var controls;
+
+function initUI() {
+  stats = new Stats();
+  stats.showPanel(0);
+  document.getElementById('container').appendChild(stats.domElement);
+
+  controls = {
+    filter: 'passThrough',
+    setFilter: function(filter) {
+      this.filter = filter;
+      filterName.innerHTML = filters[filter];
+    },
+    passThrough: function() { this.setFilter('passThrough'); },
+    startMotion: function() { this.setFilter('startMotion'); },
+    endMotion: function() { this.setFilter('endMotion'); },
+  };
+
+  let gui = new dat.GUI({ autoPlace: false });
+  let guiContainer = document.getElementById('guiContainer');
+  guiContainer.appendChild(gui.domElement);
+
+  let lastFolder = null;
+  function closeLastFolder(folder) {
+    if (lastFolder != null && lastFolder != folder) {
+      lastFolder.close();
+    }
+    lastFolder = folder;
+  }
+
+  let passThrough = gui.add(controls, 'passThrough').name(filters['passThrough']).onChange(function() {
+    closeLastFolder(null);
+  });
+  let startMotion = gui.add(controls, 'startMotion').name(filters['startMotion']).onChange(function() {
+    closeLastFolder(null);
+  });
+  let endMotion = gui.add(controls, 'endMotion').name(filters['endMotion']).onChange(function() {
+    closeLastFolder(null);
+  });
+}
+function opencvIsReady() {
+  console.log('OpenCV.js is ready');
+  initUI();
+  startCamera();
+}
+</script>
+</html>
